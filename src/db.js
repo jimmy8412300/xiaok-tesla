@@ -17,7 +17,7 @@ export function openDb(path) {
     CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       group_id TEXT NOT NULL, user_id TEXT, display_name TEXT, text TEXT NOT NULL,
-      is_order INTEGER NOT NULL DEFAULT 0, order_status TEXT,
+      is_order INTEGER NOT NULL DEFAULT 0, order_status TEXT, order_summary TEXT,
       via_bot INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, created_at);
@@ -31,6 +31,9 @@ export function openDb(path) {
       author_user_id TEXT, message_id INTEGER
     );
   `);
+  // 舊資料庫補欄位
+  const cols = db.prepare(`PRAGMA table_info(messages)`).all().map((c) => c.name);
+  if (!cols.includes('order_summary')) db.exec(`ALTER TABLE messages ADD COLUMN order_summary TEXT`);
 
   const q = (sql) => db.prepare(sql);
   const s = {
@@ -42,8 +45,8 @@ export function openDb(path) {
                      ON CONFLICT DO UPDATE SET display_name = excluded.display_name`),
     member: q(`SELECT * FROM members WHERE group_id = ? AND user_id = ?`),
     members: q(`SELECT * FROM members WHERE group_id = ?`),
-    insertMessage: q(`INSERT INTO messages (group_id, user_id, display_name, text, is_order, order_status, via_bot, created_at)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+    insertMessage: q(`INSERT INTO messages (group_id, user_id, display_name, text, is_order, order_status, order_summary, via_bot, created_at)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     recent: q(`SELECT * FROM (SELECT * FROM messages WHERE group_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`),
     openOrders: q(`SELECT * FROM messages WHERE group_id = ? AND is_order = 1 AND order_status = 'open' ORDER BY id DESC LIMIT ?`),
     countOpenOrders: q(`SELECT COUNT(*) AS n FROM messages WHERE group_id = ? AND is_order = 1 AND order_status = 'open'`),
@@ -68,9 +71,10 @@ export function openDb(path) {
     upsertMember: (groupId, userId, name) => s.upsertMember.run(groupId, userId, name),
     member: (groupId, userId) => s.member.get(groupId, userId),
     members: (groupId) => s.members.all(groupId),
-    insertMessage: ({ groupId, userId, displayName, text, isOrder, viaBot = false, createdAt = Date.now() }) =>
+    insertMessage: ({ groupId, userId, displayName, text, isOrder, summary, viaBot = false, createdAt = Date.now() }) =>
       Number(s.insertMessage.run(groupId, userId ?? null, displayName ?? null, text,
-        isOrder ? 1 : 0, isOrder ? 'open' : null, viaBot ? 1 : 0, createdAt).lastInsertRowid),
+        isOrder ? 1 : 0, isOrder ? 'open' : null, isOrder && summary ? summary : null,
+        viaBot ? 1 : 0, createdAt).lastInsertRowid),
     recent: (groupId, limit) => s.recent.all(groupId, limit),
     openOrders: (groupId, limit) => s.openOrders.all(groupId, limit),
     countOpenOrders: (groupId) => s.countOpenOrders.get(groupId).n,

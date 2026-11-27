@@ -4,9 +4,14 @@
   "description": "LINE 定位分區機器人：依所在位置拉取該區群組的最近對話與單子，私訊回覆自動轉發到群組並標記成員",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=22.9" },
+  "engines": {
+    "node": ">=22.9"
+  },
   "scripts": {
     "start": "node --env-file-if-exists=.env --no-warnings=ExperimentalWarning src/server.js",
     "test": "node --no-warnings=ExperimentalWarning --test test/*.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.14.0"
   }
 }

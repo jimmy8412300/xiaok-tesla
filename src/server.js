@@ -3,6 +3,7 @@ import { createLineClient, verifySignature } from './line.js';
 import { openDb } from './db.js';
 import { loadRegions } from './regions.js';
 import { createBot } from './bot.js';
+import { createOrderDetector, anthropicFromEnv } from './orders.js';
 
 const env = process.env;
 for (const k of ['LINE_CHANNEL_SECRET', 'LINE_CHANNEL_ACCESS_TOKEN']) {
@@ -18,10 +19,18 @@ if (!allowed.length) console.warn('⚠️ ALLOWED_USER_IDS 是空的：任何加
 const config = {
   allowedUserIds: allowed.length ? new Set(allowed) : null,
   recentLimit: Number(env.RECENT_LIMIT ?? 10),
-  orderPattern: new RegExp(env.ORDER_PATTERN ?? '^(#單|【單】|派單|訂單)|單號'),
   liveDefault: !/^(off|false|0)$/i.test(env.LIVE_FORWARD_DEFAULT ?? 'on'),
   tz: env.DISPLAY_TZ ?? 'Asia/Taipei',
 };
+
+const anthropic = anthropicFromEnv(env);
+config.detectOrder = createOrderDetector({
+  forcePattern: new RegExp(env.ORDER_PATTERN || '^(#單|【單】|派單|訂單|接單)|單號'),
+  threshold: Number(env.ORDER_SCORE_THRESHOLD ?? 3),
+  anthropic,
+  model: env.CLAUDE_MODEL || 'claude-opus-5-5',
+});
+console.log(anthropic ? `單子判斷：Claude（${env.CLAUDE_MODEL || 'claude-opus-5-5'}）＋規則` : '單子判斷：規則（設定 ANTHROPIC_API_KEY 可改用 Claude）');
 
 const regions = loadRegions(env.REGIONS_PATH ?? './config/regions.json');
 const db = openDb(env.DB_PATH ?? './data/bot.db');

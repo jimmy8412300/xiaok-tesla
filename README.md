@@ -15,7 +15,7 @@
 |---|---|
 | 依位置切換區域 | 私訊按「📍 傳送位置」，機器人找最近的區（`config/regions.json`） |
 | 拉取最近對話 | 傳位置後自動顯示，或打 `/最近` |
-| 單子 | 群組裡符合 `ORDER_PATTERN` 的訊息（預設 `#單`、`【單】`、`派單`、`訂單` 開頭，或含 `單號`）會記成單；`/單` 列出、`/完成 12` 結案 |
+| 單子 | 自動辨識群組裡的派工、交車、接送、維修、徵人支援等需求（見下方「單子怎麼判斷」）；`/單` 列出、`/完成 12` 結案 |
 | 回覆到群組 | 私訊直接打字 → 以「💬 你的名字：內容」推到該區群組 |
 | 自動標記 | ① 長按機器人轉來的訊息選「回覆」→ 自動 @原發話者，並送回**那則訊息所屬的群組**<br>② 打 `@名字` → @該成員<br>③ `@所有人` → @全部 |
 | 即時轉發 | 你所在區有新訊息時即時私訊給你，`/即時 關` 可關閉 |
@@ -23,7 +23,7 @@
 
 ## 安裝
 
-需要 Node.js 22.9 以上，**沒有其他套件依賴**（使用內建 SQLite）。
+需要 Node.js 22.9 以上（使用內建 SQLite），先執行 `npm install`。
 
 1. **建立 LINE 官方帳號 / Messaging API channel**：<https://developers.line.biz/console/>
    - Messaging API 分頁：發行 **Channel access token**；記下 Basic settings 的 **Channel secret**
@@ -32,7 +32,7 @@
 2. 設定：
    ```bash
    cp .env.example .env                       # 填入 secret / token
-   cp config/regions.example.json config/regions.json   # 填入各區中心座標與半徑(km)
+   # config/regions.json 已設定好：基隆市區，方圓 5 km
    npm start
    ```
 3. 把伺服器公開成 HTTPS（正式環境用 Render / Fly.io / VPS；本機測試可用 `ngrok http 3000`），
@@ -40,6 +40,23 @@
 4. 把機器人加進各區群組，在群組裡輸入：`/綁定 北區`（區名要跟 `regions.json` 一致）
 5. 自己加機器人好友，輸入 `/id` 取得 userId，填進 `.env` 的 `ALLOWED_USER_IDS` 後重啟。
 6. 私訊按「📍 傳送位置」開始使用。
+
+## 服務區域
+
+`config/regions.json` 目前只有一區：**基隆**，中心在基隆火車站／廟口一帶，半徑 5 km。
+範圍內：仁愛、信義、中正、中山、安樂、暖暖，以及七堵火車站附近（4.8 km）。
+八斗子大約在 5.2 km，**剛好在範圍外**。要涵蓋的話把 `radiusKm` 改成 6。
+不在範圍內傳位置時，機器人會告訴你距離多遠，不會切換區域。之後要加區，在陣列裡多加一筆就可以了。
+
+## 單子怎麼判斷
+
+不需要固定格式，分三層判斷：
+1. 以 `#單`、`【單】`、`派單`、`訂單`、`接單` 開頭，或內容有「單號」→ 一定是單
+2. 規則打分：電話 +2，時間、日期、地點（路/街/號、基隆各區）、金額、任務（交車、接送、維修、拖吊、誰有空…）、車（Model Y、車牌）各 +1，**滿 3 分就是單**
+   - 例：「明天早上10點 基隆火車站 Model Y 交車 0912-345-678」→ 是單
+   - 例：「收到」「我到了」「早安」→ 不是單
+3. **選填 Claude**：在 `.env` 填 `ANTHROPIC_API_KEY`，有任何跡象（1 分以上）的訊息會交給 Claude 判斷，並產生一行摘要（例如「📝 交車｜明天10點｜基隆站」）。
+   Claude 判斷失敗時會自動退回規則判斷。每則疑似單子的訊息會呼叫一次 API，用量大的話可以把 `CLAUDE_MODEL` 改成 `claude-haiku-5-5` 省錢。
 
 ## 指令
 
@@ -61,4 +78,4 @@ npm test     # 用假的 LINE API 跑完整流程測試
 ```
 
 程式結構：`src/server.js`（webhook）、`src/bot.js`（主要邏輯）、`src/mention.js`（@標記 → textV2）、
-`src/regions.js`（距離計算）、`src/db.js`（SQLite）、`src/line.js`（LINE API）。
+`src/orders.js`（單子判斷）、`src/regions.js`（距離計算）、`src/db.js`（SQLite）、`src/line.js`（LINE API）。

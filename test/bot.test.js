@@ -6,6 +6,7 @@ import { createBot } from '../src/bot.js';
 import { nearestRegion } from '../src/regions.js';
 import { buildGroupMessage } from '../src/mention.js';
 import { verifySignature } from '../src/line.js';
+import { createOrderDetector, scoreOrder } from '../src/orders.js';
 
 const regions = [
   { name: '北區', lat: 25.0478, lng: 121.517, radiusKm: 8 },
@@ -37,7 +38,8 @@ function setup(overrides = {}) {
   const line = fakeLine();
   const db = openDb(':memory:');
   const config = {
-    allowedUserIds: new Set([ME]), recentLimit: 10, orderPattern: /^(#單|【單】|派單|訂單)|單號/,
+    allowedUserIds: new Set([ME]), recentLimit: 10,
+    detectOrder: createOrderDetector({ forcePattern: /^(#單|【單】|派單|訂單|接單)|單號/ }),
     liveDefault: true, tz: 'Asia/Taipei', ...overrides,
   };
   const bot = createBot({ line, db, regions, config });
@@ -157,4 +159,59 @@ test('/完成 把單子關掉，未授權使用者被擋下', async () => {
   });
   assert.match(line.calls[0].messages[0].text, /還沒被授權/);
   assert.ok(!line.calls.some((c) => c.op === 'push'));
+});
+
+test('規則判斷：看得懂的單子 vs 閒聊', async () => {
+  const detect = createOrderDetector({ forcePattern: /^(#單|派單)/ });
+  const orders = [
+    '明天早上10點 基隆火車站 Model Y 交車，客人電話 0912-345-678',
+    '今天下午3點 七堵百福路 需要一台車去拖吊 費用2500',
+    '誰有空？14:30 暖暖區 接送客人到桃園機場 1800元',
+    '派單 仁愛區保養',
+  ];
+  const chat = ['早安', '收到', '我到了，等等就好', '今天天氣不錯', '剛剛那個客人人很好耶哈哈'];
+  for (const t of orders) assert.ok((await detect(t)).isOrder, `應該是單：${t}（${JSON.stringify(scoreOrder(t))}）`);
+  for (const t of chat) assert.ok(!(await detect(t)).isOrder, `不該是單：${t}（${JSON.stringify(scoreOrder(t))}）`);
+});
+
+test('Claude 判斷：疑似的才送、會帶摘要，失敗時退回規則', async () => {
+  const asked = [];
+  const fakeAnthropic = (reply) => ({
+    beta: { messages: { create: async (req) => {
+      asked.push(req);
+      if (reply instanceof Error) throw reply;
+      return { stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(reply) }] };
+    } } },
+  });
+  const detect = createOrderDetector({ forcePattern: /^#單/, anthropic: fakeAnthropic({ is_order: true, summary: '交車｜明天10點｜基隆站' }) });
+  const r = await detect('明天10點基隆站那台麻煩一下');
+  assert.deepEqual([r.isOrder, r.summary, r.by], [true, '交車｜明天10點｜基隆站', 'claude']);
+  assert.equal(asked[0].output_config.format.type, 'json_schema');
+  asked.length = 0;
+  await detect('早安'); // 沒任何跡象 → 不送 Claude
+  assert.equal(asked.length, 0);
+
+  const broken = createOrderDetector({ anthropic: fakeAnthropic(new Error('boom')), log: { error() {} } });
+  const r2 = await broken('明天早上10點 基隆火車站 交車 0912345678');
+  assert.deepEqual([r2.isOrder, r2.by], [true, 'rules']);
+});
+
+test('不在範圍內不會切換區域', async () => {
+  const { line, db, groupText, dm } = setup();
+  await groupText(G_NORTH, BOSS, '/綁定 北區');
+  line.calls.length = 0;
+  await dm({ type: 'location', id: 'l', latitude: 25.30, longitude: 121.60 }); // 離北區中心 >8km
+  assert.match(line.calls[0].messages[0].text, /不在任何服務區/);
+  assert.equal(db.user(ME), undefined);
+});
+
+test('單子摘要會顯示在單子訊息裡', async () => {
+  const { line, groupText, dm } = setup({
+    detectOrder: async (t) => (t.includes('交車') ? { isOrder: true, summary: '交車｜14:00｜信義' } : { isOrder: false }),
+  });
+  await groupText(G_NORTH, BOSS, '/綁定 北區');
+  await groupText(G_NORTH, BOSS, '下午兩點信義那台交車');
+  line.calls.length = 0;
+  await dm({ type: 'location', id: 'l', latitude: 25.04, longitude: 121.52 });
+  assert.match(line.calls[0].messages[1].text, /📝 交車｜14:00｜信義/);
 });
