@@ -1,5 +1,6 @@
 import { nearestRegion } from './regions.js';
 import { buildGroupMessage } from './mention.js';
+import { parseKeywords } from './orders.js';
 
 const MAX_TEXT = 4900;
 const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
@@ -20,7 +21,10 @@ const HELP = [
   '/最近　重新拉取對話與單子',
   '/單　列出未完成的單子',
   '/完成 編號　把單子標成完成（例：/完成 12）',
-  '/即時 開｜關　該區有新訊息時是否即時轉給你',
+  '/即時 開｜單｜關　即時轉發全部／只轉單子／關閉',
+  '/關鍵字　查看這區群組抓單的關鍵字',
+  '/關鍵字 新增 交車 拖吊　（可一次多個）',
+  '/關鍵字 刪除 交車　／　/關鍵字 清空（回到自動判斷）',
   '/位置　切換區域',
   '/id　顯示你的 LINE userId',
 ].join('\n');
@@ -160,8 +164,15 @@ export function createBot({ line, db, regions, config }) {
       return line.reply(event.replyToken, [text(completeOrder(raw, groupId))]);
     }
 
+    if (msg.type === 'text' && raw.startsWith('/關鍵字')) {
+      if (raw.trim() !== '/關鍵字' && !isAllowed(userId)) {
+        return line.reply(event.replyToken, [text('只有管理名單（ALLOWED_USER_IDS）裡的人可以修改關鍵字')]);
+      }
+      return line.reply(event.replyToken, [text(keywordCommand(raw, groupId, db.groupById(groupId)?.region ?? '這個群組'))]);
+    }
+
     const displayName = userId ? (await nameInGroup(groupId, userId)) ?? '成員' : '成員';
-    const det = msg.type === 'text' ? await config.detectOrder(raw) : { isOrder: false };
+    const det = msg.type === 'text' ? await config.detectOrder(raw, { keywords: db.keywords(groupId) }) : { isOrder: false };
     const order = det.isOrder;
     const id = db.insertMessage({ groupId, userId, displayName, text: raw, isOrder: order, summary: det.summary, createdAt: event.timestamp });
 
@@ -171,7 +182,9 @@ export function createBot({ line, db, regions, config }) {
   async function forwardLive(groupId, m) {
     const group = db.groupById(groupId);
     if (!group) return;
-    const recipients = db.liveUsersInRegion(group.region).filter((u) => u.user_id !== m.userId && isAllowed(u.user_id));
+    const recipients = db.liveUsersInRegion(group.region).filter(
+      (u) => u.user_id !== m.userId && isAllowed(u.user_id) && (u.live !== 2 || m.isOrder),
+    );
     for (const u of recipients) {
       const head = m.isOrder ? `📋 新單 #${m.id}｜${group.region}` : `🔔 ${group.region}`;
       const sum = m.summary ? `📝 ${m.summary}\n` : '';
@@ -183,6 +196,21 @@ export function createBot({ line, db, regions, config }) {
         console.error('即時轉發失敗', u.user_id, err.message);
       }
     }
+  }
+
+  function keywordCommand(raw, groupId, label) {
+    const rest = raw.replace('/關鍵字', '').trim();
+    const [action, ...more] = rest.split(/\s+/);
+    const list = parseKeywords(more.join(' '));
+    if (/^(新增|加|add)$/i.test(action ?? '') && list.length) db.addKeywords(groupId, list);
+    else if (/^(刪除|移除|刪|del)$/i.test(action ?? '') && list.length) db.delKeywords(groupId, list);
+    else if (/^(清空|清除|clear)$/i.test(action ?? '')) db.clearKeywords(groupId);
+    else if (rest) return '用法：/關鍵字 新增 交車 拖吊　｜　/關鍵字 刪除 交車　｜　/關鍵字 清空';
+
+    const now = db.keywords(groupId);
+    return now.length
+      ? `🔑 「${label}」抓單關鍵字（${now.length}）：\n${now.join('、')}\n\n訊息裡有任一個字眼就記成一張單。`
+      : `🔑 「${label}」沒有設定關鍵字，目前用自動判斷（時間、地點、電話、任務…）。\n設定：/關鍵字 新增 交車 拖吊`;
   }
 
   function completeOrder(raw, groupId) {
@@ -226,9 +254,15 @@ export function createBot({ line, db, regions, config }) {
       case '/位置':
         return line.reply(event.replyToken, withQuickReply([text('請按下方「📍 傳送位置」分享你目前的位置。')]));
       case '/即時': {
-        const on = !/關|off/i.test(t);
-        db.setLive(userId, on);
-        return line.reply(event.replyToken, [text(on ? '🔔 已開啟即時轉發' : '🔕 已關閉即時轉發')]);
+        const mode = /關|off/i.test(t) ? 0 : /單|order/i.test(t) ? 2 : 1;
+        db.setLive(userId, mode);
+        const msgs = ['🔕 已關閉即時轉發', '🔔 已開啟即時轉發（全部訊息）', '📋 即時轉發：只轉單子（符合關鍵字或判斷為單的訊息）'];
+        return line.reply(event.replyToken, [text(msgs[mode])]);
+      }
+      case '/關鍵字': {
+        const { user, group } = currentGroup(userId);
+        if (!group) return askLocation(event, user);
+        return line.reply(event.replyToken, [text(keywordCommand(t, group.group_id, group.region))]);
       }
       case '/完成':
         return line.reply(event.replyToken, [text(completeOrder(t, currentGroup(userId).group?.group_id))]);
@@ -309,7 +343,7 @@ export function createBot({ line, db, regions, config }) {
       return line.reply(event.replyToken, [text(`❌ 轉發失敗：${clip(err.message, 300)}`)]);
     }
 
-    const det = await config.detectOrder(t);
+    const det = await config.detectOrder(t, { keywords: db.keywords(group.group_id) });
     const order = det.isOrder;
     const id = db.insertMessage({ groupId: group.group_id, userId, displayName: name, text: t, isOrder: order, summary: det.summary, viaBot: true });
     // 機器人推到群組的訊息不會再觸發 webhook，所以這裡自己通知該區其他開即時轉發的人

@@ -54,9 +54,14 @@ export function createOrderDetector({ forcePattern, threshold = 3, anthropic = n
     return { isOrder: Boolean(out.is_order), summary: out.is_order ? String(out.summary || '') : '' };
   }
 
-  return async function detectOrder(text) {
+  /** keywords：該群組自訂的關鍵字。有設定時只看關鍵字（加上強制開頭），不做自動判斷 */
+  return async function detectOrder(text, { keywords = [] } = {}) {
     const t = text.trim();
     if (forcePattern?.test(t)) return { isOrder: true, summary: '', by: 'prefix' };
+    if (keywords.length) {
+      const hits = matchKeywords(t, keywords);
+      return { isOrder: hits.length > 0, summary: hits.length ? `關鍵字：${hits.join('、')}` : '', by: 'keyword', hits };
+    }
     const { score } = scoreOrder(t);
     if (anthropic && score >= 1) {
       try {
@@ -67,6 +72,16 @@ export function createOrderDetector({ forcePattern, threshold = 3, anthropic = n
     }
     return { isOrder: score >= threshold, summary: '', by: 'rules' };
   };
+}
+
+export function matchKeywords(text, keywords) {
+  const lower = text.toLowerCase();
+  return keywords.filter((k) => lower.includes(k.toLowerCase()));
+}
+
+/** 「交車, 取車、拖吊 接送」→ ['交車','取車','拖吊','接送'] */
+export function parseKeywords(s) {
+  return [...new Set(s.split(/[\s,，、;；]+/).map((k) => k.trim()).filter(Boolean))];
 }
 
 export function anthropicFromEnv(env) {

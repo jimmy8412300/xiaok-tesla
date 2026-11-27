@@ -25,6 +25,9 @@ export function openDb(path) {
       user_id TEXT PRIMARY KEY, region TEXT, lat REAL, lng REAL,
       live INTEGER NOT NULL DEFAULT 1, updated_at INTEGER
     );
+    CREATE TABLE IF NOT EXISTS keywords (
+      group_id TEXT NOT NULL, keyword TEXT NOT NULL, PRIMARY KEY (group_id, keyword)
+    );
     -- 機器人私訊出去的每一則訊息 → 原始群組/作者，讓使用者「回覆」那則訊息時能自動標記原作者
     CREATE TABLE IF NOT EXISTS relay (
       sent_message_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, group_id TEXT NOT NULL,
@@ -58,7 +61,11 @@ export function openDb(path) {
                            lng = excluded.lng, updated_at = excluded.updated_at`),
     setLive: q(`INSERT INTO users (user_id, live, updated_at) VALUES (?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET live = excluded.live`),
-    liveUsersInRegion: q(`SELECT * FROM users WHERE region = ? AND live = 1`),
+    liveUsersInRegion: q(`SELECT * FROM users WHERE region = ? AND live >= 1`),
+    keywords: q(`SELECT keyword FROM keywords WHERE group_id = ? ORDER BY rowid`),
+    addKeyword: q(`INSERT OR IGNORE INTO keywords (group_id, keyword) VALUES (?, ?)`),
+    delKeyword: q(`DELETE FROM keywords WHERE group_id = ? AND keyword = ?`),
+    clearKeywords: q(`DELETE FROM keywords WHERE group_id = ?`),
     insertRelay: q(`INSERT OR REPLACE INTO relay (sent_message_id, user_id, group_id, author_user_id, message_id) VALUES (?, ?, ?, ?, ?)`),
     relay: q(`SELECT * FROM relay WHERE sent_message_id = ? AND user_id = ?`),
   };
@@ -83,7 +90,12 @@ export function openDb(path) {
     user: (userId) => s.user.get(userId),
     setUserLocation: (userId, region, lat, lng, liveDefault) =>
       s.upsertUserLocation.run(userId, region, lat, lng, liveDefault ? 1 : 0, Date.now()),
-    setLive: (userId, on) => s.setLive.run(userId, on ? 1 : 0, Date.now()),
+    /** live：0 關、1 全部轉發、2 只轉發單子 */
+    setLive: (userId, mode) => s.setLive.run(userId, Number(mode), Date.now()),
+    keywords: (groupId) => s.keywords.all(groupId).map((r) => r.keyword),
+    addKeywords: (groupId, list) => list.forEach((k) => s.addKeyword.run(groupId, k)),
+    delKeywords: (groupId, list) => list.forEach((k) => s.delKeyword.run(groupId, k)),
+    clearKeywords: (groupId) => s.clearKeywords.run(groupId),
     liveUsersInRegion: (region) => s.liveUsersInRegion.all(region),
     insertRelay: (sentId, userId, groupId, authorUserId, messageId) =>
       s.insertRelay.run(sentId, userId, groupId, authorUserId ?? null, messageId ?? null),

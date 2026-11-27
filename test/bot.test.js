@@ -215,3 +215,49 @@ test('單子摘要會顯示在單子訊息裡', async () => {
   await dm({ type: 'location', id: 'l', latitude: 25.04, longitude: 121.52 });
   assert.match(line.calls[0].messages[1].text, /📝 交車｜14:00｜信義/);
 });
+
+test('每個群組自己的關鍵字：只有設定的群組改用抓字眼', async () => {
+  const { line, db, groupText, dm } = setup();
+  await groupText(G_NORTH, BOSS, '/綁定 北區');
+  await groupText(G_SOUTH, BOSS, '/綁定 南區');
+
+  // 未授權的人不能改
+  line.calls.length = 0;
+  await groupText(G_NORTH, BOSS, '/關鍵字 新增 交車');
+  assert.match(line.calls[0].messages[0].text, /只有管理名單/);
+
+  await groupText(G_NORTH, ME, '/關鍵字 新增 交車, 拖吊、ModelY 交車');
+  assert.deepEqual(db.keywords(G_NORTH), ['交車', '拖吊', 'ModelY']);
+  assert.deepEqual(db.keywords(G_SOUTH), []);
+
+  await groupText(G_NORTH, BOSS, '等等有一台要拖吊');              // 關鍵字 → 單
+  await groupText(G_NORTH, BOSS, '明天10點 基隆站 接送 0912345678'); // 沒關鍵字 → 不是單（即使很像）
+  await groupText(G_SOUTH, BOSS, '明天10點 高雄站 接送 0912345678'); // 南區沒設關鍵字 → 自動判斷 → 單
+  const north = db.openOrders(G_NORTH, 5);
+  assert.equal(north.length, 1);
+  assert.equal(north[0].order_summary, '關鍵字：拖吊');
+  assert.equal(db.openOrders(G_SOUTH, 5).length, 1);
+
+  // 私訊也能管理目前所在區的關鍵字
+  await dm({ type: 'location', id: 'l', latitude: 25.04, longitude: 121.52 });
+  line.calls.length = 0;
+  await dm({ type: 'text', id: 'k', text: '/關鍵字 刪除 ModelY' });
+  assert.match(line.calls[0].messages[0].text, /交車、拖吊/);
+  await dm({ type: 'text', id: 'k2', text: '/關鍵字 清空' });
+  assert.deepEqual(db.keywords(G_NORTH), []);
+});
+
+test('/即時 單：只轉發單子', async () => {
+  const { line, groupText, dm } = setup();
+  await groupText(G_NORTH, BOSS, '/綁定 北區');
+  await groupText(G_NORTH, ME, '/關鍵字 新增 交車');
+  await dm({ type: 'location', id: 'l', latitude: 25.04, longitude: 121.52 });
+  await dm({ type: 'text', id: 'm', text: '/即時 單' });
+
+  line.calls.length = 0;
+  await groupText(G_NORTH, AMY, '大家吃飽沒');
+  await groupText(G_NORTH, AMY, '下午兩點信義區交車');
+  const pushes = line.calls.filter((c) => c.op === 'push' && c.to === ME);
+  assert.equal(pushes.length, 1);
+  assert.match(pushes[0].messages[0].text, /📋 新單 #\d+｜北區\n📝 關鍵字：交車/);
+});
