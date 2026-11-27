@@ -21,6 +21,8 @@ const config = {
   recentLimit: Number(env.RECENT_LIMIT ?? 10),
   liveDefault: !/^(off|false|0)$/i.test(env.LIVE_FORWARD_DEFAULT ?? 'on'),
   tz: env.DISPLAY_TZ ?? 'Asia/Taipei',
+  // 只顯示幾小時內的單，太舊的單通常已經被接走了
+  orderMaxAgeHours: Number(env.ORDER_MAX_AGE_HOURS ?? 6),
 };
 
 const anthropic = anthropicFromEnv(env);

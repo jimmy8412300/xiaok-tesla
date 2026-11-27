@@ -40,7 +40,7 @@ function setup(overrides = {}) {
   const config = {
     allowedUserIds: new Set([ME]), recentLimit: 10,
     detectOrder: createOrderDetector({ forcePattern: /^(#單|【單】|派單|訂單|接單)|單號/ }),
-    liveDefault: true, tz: 'Asia/Taipei', ...overrides,
+    liveDefault: true, tz: 'Asia/Taipei', orderMaxAgeHours: 24 * 365 * 100, ...overrides,
   };
   const bot = createBot({ line, db, regions, config });
   let t = 1_700_000_000_000;
@@ -115,7 +115,7 @@ test('完整流程：綁定 → 群組對話 → 傳位置拉紀錄 → 回覆�
   assert.equal(m.substitution.m1.mentionee.userId, BOSS);
   assert.equal(m.substitution.m0.mentionee.userId, AMY);
   const confirm = line.calls.find((c) => c.op === 'reply');
-  assert.match(confirm.messages[0].text, /已送到「北區」群組/);
+  assert.match(confirm.messages[0].text, /已送到「北區工作群」/);
   assert.match(confirm.messages[0].text, /已標記：Amy、王老闆/);
 
   // 送出的訊息也進了紀錄
@@ -130,7 +130,7 @@ test('即時轉發：同區新訊息推到私訊，回覆它就標記發話者',
   line.calls.length = 0;
   await groupText(G_NORTH, AMY, '有人在附近嗎');
   const live = line.calls.find((c) => c.op === 'push' && c.to === ME);
-  assert.match(live.messages[0].text, /🔔 北區\nAmy/);
+  assert.match(live.messages[0].text, /🔔 🚩 北區\n北區工作群\nAmy/);
 
   line.calls.length = 0;
   await dm({ type: 'text', id: 't2', text: '我在', quotedMessageId: live.ids[0] });
@@ -259,5 +259,46 @@ test('/即時 單：只轉發單子', async () => {
   await groupText(G_NORTH, AMY, '下午兩點信義區交車');
   const pushes = line.calls.filter((c) => c.op === 'push' && c.to === ME);
   assert.equal(pushes.length, 1);
-  assert.match(pushes[0].messages[0].text, /📋 新單 #\d+｜北區\n📝 關鍵字：交車/);
+  assert.match(pushes[0].messages[0].text, /📋 新單 #\d+｜🚩 北區\n北區工作群\n📝 關鍵字：交車/);
+});
+
+test('跨群組抓基隆的單：依上車點分區、長按回覆回到原群組', async () => {
+  const line = fakeLine();
+  const db = openDb(':memory:');
+  const kee = [{ name: '基隆', lat: 25.129, lng: 121.741, radiusKm: 5, places: ['基隆', '七堵', '暖暖', '安樂區', '仁愛區'] }];
+  const bot = createBot({ line, db, regions: kee, config: {
+    allowedUserIds: new Set([ME]), recentLimit: 10, liveDefault: true, tz: 'Asia/Taipei', orderMaxAgeHours: 6,
+    detectOrder: createOrderDetector({ forcePattern: /^#單/ }),
+  } });
+  line.groupSummary = async (g) => ({ groupName: { G1: '安馨徵司機', G2: 'RS雙北', G3: '萌系小秘書' }[g] });
+  let t = Date.now() - 3600_000;
+  const say = (groupId, userId, text) => bot.handleEvent({ type: 'message', replyToken: 'r', timestamp: (t += 1000),
+    source: { type: 'group', groupId, userId }, message: { type: 'text', id: String(t), text } });
+
+  await say('G3', ME, '/關鍵字 全部'); // 派單群：每則都是單
+  await say('G1', BOSS, '基隆市中山區仁正里中山二路105巷118號 下車地址：台北市中山北路六段157巷11號 11/28 05:30');
+  await say('G2', AMY, 'R 萬里區野柳里港東路152號 ⬇️基隆 S 23:00');
+  await say('G3', BOSS, 'F新莊榮華路二段8號 ⬇️台北 F三重中正南路235號 ⬇️台北');
+  await say('G3', AMY, 'F 七堵明德一路100號 ⬇️台北');
+
+  line.calls.length = 0;
+  await bot.handleEvent({ type: 'message', replyToken: 'x', timestamp: t, source: { type: 'user', userId: ME },
+    message: { type: 'location', id: 'l', latitude: 25.13, longitude: 121.74 } });
+  const r = line.calls[0];
+  assert.match(r.messages[0].text, /跟「基隆」有關的單：3 張/);
+  const bubbles = r.messages.slice(1).map((m) => m.text);
+  assert.equal(bubbles.length, 3);
+  assert.match(bubbles[0], /萌系小秘書\n🚩 基隆上車[\s\S]*七堵/);   // 上車在基隆的排前面
+  assert.match(bubbles[1], /安馨徵司機\n🚩 基隆上車/);
+  assert.match(bubbles[2], /RS雙北\n🏁 送到基隆/);                // 只有目的地在基隆的排後面
+  assert.ok(!bubbles.some((b) => b.includes('新莊')));
+
+  // 長按安馨那張單回覆 → 送回安馨群組並標記發單人
+  line.calls.length = 0;
+  await bot.handleEvent({ type: 'message', replyToken: 'y', timestamp: t, source: { type: 'user', userId: ME },
+    message: { type: 'text', id: 'q', text: '我接，10分鐘到', quotedMessageId: r.ids[2] } });
+  const push = line.calls.find((c) => c.op === 'push');
+  assert.equal(push.to, 'G1');
+  assert.equal(push.messages[0].substitution.m0.mentionee.userId, BOSS);
+  assert.match(line.calls.find((c) => c.op === 'reply').messages[0].text, /已送到「安馨徵司機」/);
 });

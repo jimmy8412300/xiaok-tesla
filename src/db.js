@@ -25,6 +25,7 @@ export function openDb(path) {
       user_id TEXT PRIMARY KEY, region TEXT, lat REAL, lng REAL,
       live INTEGER NOT NULL DEFAULT 1, updated_at INTEGER
     );
+    CREATE TABLE IF NOT EXISTS group_info (group_id TEXT PRIMARY KEY, name TEXT);
     CREATE TABLE IF NOT EXISTS keywords (
       group_id TEXT NOT NULL, keyword TEXT NOT NULL, PRIMARY KEY (group_id, keyword)
     );
@@ -37,6 +38,8 @@ export function openDb(path) {
   // 舊資料庫補欄位
   const cols = db.prepare(`PRAGMA table_info(messages)`).all().map((c) => c.name);
   if (!cols.includes('order_summary')) db.exec(`ALTER TABLE messages ADD COLUMN order_summary TEXT`);
+  // regions 格式：",基隆:pickup,台北:drop,"
+  if (!cols.includes('regions')) db.exec(`ALTER TABLE messages ADD COLUMN regions TEXT`);
 
   const q = (sql) => db.prepare(sql);
   const s = {
@@ -48,8 +51,8 @@ export function openDb(path) {
                      ON CONFLICT DO UPDATE SET display_name = excluded.display_name`),
     member: q(`SELECT * FROM members WHERE group_id = ? AND user_id = ?`),
     members: q(`SELECT * FROM members WHERE group_id = ?`),
-    insertMessage: q(`INSERT INTO messages (group_id, user_id, display_name, text, is_order, order_status, order_summary, via_bot, created_at)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    insertMessage: q(`INSERT INTO messages (group_id, user_id, display_name, text, is_order, order_status, order_summary, regions, via_bot, created_at)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     recent: q(`SELECT * FROM (SELECT * FROM messages WHERE group_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`),
     openOrders: q(`SELECT * FROM messages WHERE group_id = ? AND is_order = 1 AND order_status = 'open' ORDER BY id DESC LIMIT ?`),
     countOpenOrders: q(`SELECT COUNT(*) AS n FROM messages WHERE group_id = ? AND is_order = 1 AND order_status = 'open'`),
@@ -62,6 +65,12 @@ export function openDb(path) {
     setLive: q(`INSERT INTO users (user_id, live, updated_at) VALUES (?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET live = excluded.live`),
     liveUsersInRegion: q(`SELECT * FROM users WHERE region = ? AND live >= 1`),
+    regionOrders: q(`SELECT m.*, gi.name AS group_name FROM messages m LEFT JOIN group_info gi USING (group_id)
+                      WHERE m.is_order = 1 AND m.order_status = 'open' AND m.regions LIKE ? AND m.created_at >= ?
+                      ORDER BY (m.regions LIKE ?) DESC, m.id DESC LIMIT ?`),
+    countRegionOrders: q(`SELECT COUNT(*) AS n FROM messages WHERE is_order = 1 AND order_status = 'open' AND regions LIKE ? AND created_at >= ?`),
+    groupName: q(`SELECT name FROM group_info WHERE group_id = ?`),
+    setGroupName: q(`INSERT OR REPLACE INTO group_info (group_id, name) VALUES (?, ?)`),
     keywords: q(`SELECT keyword FROM keywords WHERE group_id = ? ORDER BY rowid`),
     addKeyword: q(`INSERT OR IGNORE INTO keywords (group_id, keyword) VALUES (?, ?)`),
     delKeyword: q(`DELETE FROM keywords WHERE group_id = ? AND keyword = ?`),
@@ -78,10 +87,17 @@ export function openDb(path) {
     upsertMember: (groupId, userId, name) => s.upsertMember.run(groupId, userId, name),
     member: (groupId, userId) => s.member.get(groupId, userId),
     members: (groupId) => s.members.all(groupId),
-    insertMessage: ({ groupId, userId, displayName, text, isOrder, summary, viaBot = false, createdAt = Date.now() }) =>
+    insertMessage: ({ groupId, userId, displayName, text, isOrder, summary, regions = [], viaBot = false, createdAt = Date.now() }) =>
       Number(s.insertMessage.run(groupId, userId ?? null, displayName ?? null, text,
         isOrder ? 1 : 0, isOrder ? 'open' : null, isOrder && summary ? summary : null,
+        regions.length ? `,${regions.map((r) => `${r.name}:${r.where}`).join(',')},` : null,
         viaBot ? 1 : 0, createdAt).lastInsertRowid),
+    /** 所有群組裡、上車點或目的地在該區的未完成單（上車點在該區的排前面） */
+    regionOrders: (region, sinceTs, limit) => s.regionOrders.all(`%,${region}:%`, sinceTs, `%,${region}:pickup,%`, limit),
+    countRegionOrders: (region, sinceTs) => s.countRegionOrders.get(`%,${region}:%`, sinceTs).n,
+    groupName: (groupId) => s.groupName.get(groupId)?.name ?? s.groupById.get(groupId)?.name ?? null,
+    hasGroupInfo: (groupId) => Boolean(s.groupName.get(groupId)),
+    setGroupName: (groupId, name) => s.setGroupName.run(groupId, name),
     recent: (groupId, limit) => s.recent.all(groupId, limit),
     openOrders: (groupId, limit) => s.openOrders.all(groupId, limit),
     countOpenOrders: (groupId) => s.countOpenOrders.get(groupId).n,

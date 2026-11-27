@@ -11,6 +11,8 @@ const SIGNALS = [
   { re: /[路街道巷弄段號樓]|基隆|七堵|暖暖|安樂|仁愛|信義|中正|中山|八堵|百福|港口|火車站|交流道/, w: 1, label: '地點' },
   { re: /\d+\s*(元|塊|k\b)|\$\s*\d+|NT\$?\s*\d+|費用|報價|價錢|多少錢/i, w: 1, label: '金額' },
   { re: /交車|取車|送車|牽車|接送|載|維修|保養|安裝|充電|拖吊|救援|洗車|鍍膜|貼膜|代駕|預約|叫車|出車|接人|支援|急件|派|徵|缺人|誰可以|有人可以|誰有空|麻煩.*(去|跑|幫)/, w: 1, label: '任務' },
+  { re: /⬇️|⬇|↓|→|➡️|上車|下車|接送|機場/, w: 1, label: '路線' },
+  { re: /\d+\s*(巷|弄|號)/, w: 1, label: '地址' },
   { re: /model\s*[3ysx]|特斯拉|tesla|車牌|[A-Z]{2,3}-?\d{3,4}/i, w: 1, label: '車' },
 ];
 
@@ -59,6 +61,7 @@ export function createOrderDetector({ forcePattern, threshold = 3, anthropic = n
     const t = text.trim();
     if (forcePattern?.test(t)) return { isOrder: true, summary: '', by: 'prefix' };
     if (keywords.length) {
+      if (keywords.includes('*')) return { isOrder: t.length >= 6, summary: '', by: 'keyword', hits: [] };
       const hits = matchKeywords(t, keywords);
       return { isOrder: hits.length > 0, summary: hits.length ? `關鍵字：${hits.join('、')}` : '', by: 'keyword', hits };
     }

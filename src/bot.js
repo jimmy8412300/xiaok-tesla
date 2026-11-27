@@ -1,4 +1,4 @@
-import { nearestRegion } from './regions.js';
+import { nearestRegion, matchPlaces } from './regions.js';
 import { buildGroupMessage } from './mention.js';
 import { parseKeywords } from './orders.js';
 
@@ -11,20 +11,21 @@ const NON_TEXT_LABEL = {
 
 const HELP = [
   '📖 使用方式',
-  '1. 按下方「📍 傳送位置」，我會依你所在的區，拉出該區群組最近的對話和未完成的單子。',
-  '2. 直接打字 → 會以你的名字轉發到該區群組。',
+  '1. 按下方「📍 傳送位置」，我會從所有群組裡找出你所在區的單子（例如上車點在基隆的）。',
+  '2. 長按某張單選「回覆」再打字 → 送回那張單原本的群組並標記發單人。',
   '3. 群組裡的派工、交車、接送等需求會自動辨識成「單」。',
   '4. 長按我轉來的某則訊息選「回覆」→ 會自動標記那則訊息的發話者。',
   '5. 打「@名字」可標記群組裡的人，「@所有人」標記全部。',
   '',
   '指令：',
   '/最近　重新拉取對話與單子',
-  '/單　列出未完成的單子',
+  '/單　列出你所在區的單（/單 2 看下一批）',
   '/完成 編號　把單子標成完成（例：/完成 12）',
   '/即時 開｜單｜關　即時轉發全部／只轉單子／關閉',
   '/關鍵字　查看這區群組抓單的關鍵字',
   '/關鍵字 新增 交車 拖吊　（可一次多個）',
   '/關鍵字 刪除 交車　／　/關鍵字 清空（回到自動判斷）',
+  '/關鍵字 全部　這個群組每則訊息都當成單（派單群）',
   '/位置　切換區域',
   '/id　顯示你的 LINE userId',
 ].join('\n');
@@ -92,37 +93,40 @@ export function createBot({ line, db, regions, config }) {
     return { user: u, group: db.groupByRegion(u.region) };
   }
 
+  const since = () => Date.now() - config.orderMaxAgeHours * 3600_000;
+  const groupLabel = (groupId) => db.groupName(groupId) ?? '群組';
+
   function orderBubble(o, region) {
     const sum = o.order_summary ? `📝 ${o.order_summary}\n` : '';
+    const where = region && o.regions?.includes(`,${region}:drop,`) ? `🏁 送到${region}` : region ? `🚩 ${region}上車` : '';
     return text(
-      `📋 單 #${o.id}｜${region}\n${sum}${o.display_name ?? '成員'}　${time(o.created_at)}\n\n${o.text}\n\n` +
-        `↩️ 長按此訊息「回覆」即可回覆並標記 ${o.display_name ?? '發單人'}`,
+      `📋 單 #${o.id}｜${groupLabel(o.group_id)}\n${where ? where + '\n' : ''}${sum}${o.display_name ?? '成員'}　${time(o.created_at)}\n\n${o.text}\n\n` +
+        `↩️ 長按此訊息「回覆」→ 回到這個群組並標記 ${o.display_name ?? '發單人'}`,
     );
   }
 
-  function summary(userId, group, header) {
-    const recent = db.recent(group.group_id, config.recentLimit);
-    const orders = db.openOrders(group.group_id, 4);
-    const totalOrders = db.countOpenOrders(group.group_id);
+  function regionSummary(userId, region, header) {
+    const orders = db.regionOrders(region, since(), 4);
+    const total = db.countRegionOrders(region, since());
+    const group = db.groupByRegion(region);
+    const recent = group ? db.recent(group.group_id, config.recentLimit) : [];
 
-    const lines = [header, `群組：${group.name ?? group.region}`, ''];
-    if (recent.length === 0) {
-      lines.push('（目前還沒有紀錄。機器人只看得到它加入群組之後的訊息）');
-    } else {
-      lines.push(`🗨 最近 ${recent.length} 則對話`);
+    const lines = [header, ''];
+    lines.push(total ? `📋 最近 ${config.orderMaxAgeHours} 小時、各群組裡跟「${region}」有關的單：${total} 張` : `📋 最近 ${config.orderMaxAgeHours} 小時沒有跟「${region}」有關的單`);
+    if (total > orders.length) lines.push(`（先顯示 ${orders.length} 張，${region}上車的排前面；輸入 /單 看下一批）`);
+    if (recent.length) {
+      lines.push('', `🗨 ${groupLabel(group.group_id)} 最近 ${recent.length} 則對話`);
       for (const m of recent) {
         const tag = m.is_order ? `📋#${m.id} ` : '';
         lines.push(`[${time(m.created_at)}] ${m.display_name ?? '成員'}：${tag}${clip(m.text.replace(/\n/g, ' '), 80)}`);
       }
     }
-    lines.push('', totalOrders ? `📋 未完成的單：${totalOrders} 張` : '📋 目前沒有未完成的單');
-    if (totalOrders > orders.length) lines.push(`（只顯示最新 ${orders.length} 張，輸入 /單 查看）`);
-    lines.push('', '直接打字就會轉發到群組，打「@名字」可標記人。');
+    lines.push('', '想接哪張單，就長按那張單選「回覆」，打字會送回原本的群組並標記發單人。');
 
-    const messages = [text(lines.join('\n')), ...orders.map((o) => orderBubble(o, group.region))];
+    const messages = [text(lines.join('\n')), ...orders.map((o) => orderBubble(o, region))];
     const targets = [
-      { groupId: group.group_id, authorUserId: null, messageId: null },
-      ...orders.map((o) => ({ groupId: group.group_id, authorUserId: o.user_id, messageId: o.id })),
+      group ? { groupId: group.group_id, authorUserId: null, messageId: null } : null,
+      ...orders.map((o) => ({ groupId: o.group_id, authorUserId: o.user_id, messageId: o.id })),
     ];
     targets.userId = userId;
     return { messages: withQuickReply(messages), targets };
@@ -136,7 +140,7 @@ export function createBot({ line, db, regions, config }) {
     if (event.type === 'join') {
       const names = regions.map((r) => r.name).join('、');
       return line.reply(event.replyToken, [
-        text(`大家好！請管理員輸入「/綁定 區名」把這個群組綁到一個區域。\n可用區域：${names}`),
+        text(`大家好！我會整理這個群組裡的單子，依上車地點分區（${names}）。\n（選填）整個群組都屬於同一區的話，可以輸入「/綁定 區名」。`),
       ]);
     }
     if (event.type !== 'message') return;
@@ -168,27 +172,49 @@ export function createBot({ line, db, regions, config }) {
       if (raw.trim() !== '/關鍵字' && !isAllowed(userId)) {
         return line.reply(event.replyToken, [text('只有管理名單（ALLOWED_USER_IDS）裡的人可以修改關鍵字')]);
       }
-      return line.reply(event.replyToken, [text(keywordCommand(raw, groupId, db.groupById(groupId)?.region ?? '這個群組'))]);
+      return line.reply(event.replyToken, [text(keywordCommand(raw, groupId, groupLabel(groupId)))]);
+    }
+
+    if (!db.hasGroupInfo(groupId)) {
+      let name = null;
+      try {
+        name = (await line.groupSummary(groupId)).groupName;
+      } catch {}
+      db.setGroupName(groupId, name);
     }
 
     const displayName = userId ? (await nameInGroup(groupId, userId)) ?? '成員' : '成員';
-    const det = msg.type === 'text' ? await config.detectOrder(raw, { keywords: db.keywords(groupId) }) : { isOrder: false };
-    const order = det.isOrder;
-    const id = db.insertMessage({ groupId, userId, displayName, text: raw, isOrder: order, summary: det.summary, createdAt: event.timestamp });
-
-    await forwardLive(groupId, { id, userId, displayName, text: raw, isOrder: order, summary: det.summary, createdAt: event.timestamp });
+    await record(groupId, { userId, displayName, text: raw, isText: msg.type === 'text', createdAt: event.timestamp });
   }
 
-  async function forwardLive(groupId, m) {
-    const group = db.groupById(groupId);
-    if (!group) return;
-    const recipients = db.liveUsersInRegion(group.region).filter(
-      (u) => u.user_id !== m.userId && isAllowed(u.user_id) && (u.live !== 2 || m.isOrder),
-    );
-    for (const u of recipients) {
-      const head = m.isOrder ? `📋 新單 #${m.id}｜${group.region}` : `🔔 ${group.region}`;
+  /** 存進資料庫、判斷是不是單、標記跟哪些區有關，然後即時轉發 */
+  async function record(groupId, { userId, displayName, text: t, isText = true, viaBot = false, createdAt = Date.now() }) {
+    const det = isText ? await config.detectOrder(t, { keywords: db.keywords(groupId) }) : { isOrder: false };
+    const tags = isText ? matchPlaces(regions, t) : [];
+    const bound = db.groupById(groupId)?.region;
+    if (bound && !tags.some((x) => x.name === bound)) tags.push({ name: bound, where: 'pickup' });
+    const id = db.insertMessage({ groupId, userId, displayName, text: t, isOrder: det.isOrder, summary: det.summary, regions: tags, viaBot, createdAt });
+    const m = { id, userId, displayName, text: t, isOrder: det.isOrder, summary: det.summary, createdAt };
+    forwardLive(groupId, m, tags).catch((err) => console.error('即時轉發失敗', err.message));
+    return m;
+  }
+
+  async function forwardLive(groupId, m, tags) {
+    const seen = new Set();
+    const recipients = [];
+    for (const tag of tags) {
+      for (const u of db.liveUsersInRegion(tag.name)) {
+        if (seen.has(u.user_id) || u.user_id === m.userId || !isAllowed(u.user_id)) continue;
+        if (u.live === 2 && !m.isOrder) continue;
+        seen.add(u.user_id);
+        recipients.push({ u, tag });
+      }
+    }
+    for (const { u, tag } of recipients) {
+      const where = tag.where === 'drop' ? `🏁 送到${tag.name}` : `🚩 ${tag.name}`;
+      const head = m.isOrder ? `📋 新單 #${m.id}｜${where}` : `🔔 ${where}`;
       const sum = m.summary ? `📝 ${m.summary}\n` : '';
-      const body = `${head}\n${sum}${m.displayName}　${time(m.createdAt)}\n\n${m.text}`;
+      const body = `${head}\n${groupLabel(groupId)}\n${sum}${m.displayName}　${time(m.createdAt)}\n\n${m.text}`;
       const targets = [{ groupId, authorUserId: m.userId, messageId: m.id }];
       try {
         await send({ to: u.user_id }, [text(body)], targets);
@@ -205,9 +231,11 @@ export function createBot({ line, db, regions, config }) {
     if (/^(新增|加|add)$/i.test(action ?? '') && list.length) db.addKeywords(groupId, list);
     else if (/^(刪除|移除|刪|del)$/i.test(action ?? '') && list.length) db.delKeywords(groupId, list);
     else if (/^(清空|清除|clear)$/i.test(action ?? '')) db.clearKeywords(groupId);
-    else if (rest) return '用法：/關鍵字 新增 交車 拖吊　｜　/關鍵字 刪除 交車　｜　/關鍵字 清空';
+    else if (/^(全部|all|\*)$/i.test(action ?? '')) (db.clearKeywords(groupId), db.addKeywords(groupId, ['*']));
+    else if (rest) return '用法：/關鍵字 新增 交車 拖吊　｜　/關鍵字 刪除 交車　｜　/關鍵字 全部　｜　/關鍵字 清空';
 
     const now = db.keywords(groupId);
+    if (now.includes('*')) return `🔑 「${label}」設定為：每則訊息都當成單（派單群適用）。\n改回：/關鍵字 清空`;
     return now.length
       ? `🔑 「${label}」抓單關鍵字（${now.length}）：\n${now.join('、')}\n\n訊息裡有任一個字眼就記成一張單。`
       : `🔑 「${label}」沒有設定關鍵字，目前用自動判斷（時間、地點、電話、任務…）。\n設定：/關鍵字 新增 交車 拖吊`;
@@ -256,7 +284,7 @@ export function createBot({ line, db, regions, config }) {
       case '/即時': {
         const mode = /關|off/i.test(t) ? 0 : /單|order/i.test(t) ? 2 : 1;
         db.setLive(userId, mode);
-        const msgs = ['🔕 已關閉即時轉發', '🔔 已開啟即時轉發（全部訊息）', '📋 即時轉發：只轉單子（符合關鍵字或判斷為單的訊息）'];
+        const msgs = ['🔕 已關閉即時轉發', '🔔 已開啟即時轉發（全部訊息）', '📋 即時轉發：只轉跟你所在區有關的單子'];
         return line.reply(event.replyToken, [text(msgs[mode])]);
       }
       case '/關鍵字': {
@@ -265,21 +293,23 @@ export function createBot({ line, db, regions, config }) {
         return line.reply(event.replyToken, [text(keywordCommand(t, group.group_id, group.region))]);
       }
       case '/完成':
-        return line.reply(event.replyToken, [text(completeOrder(t, currentGroup(userId).group?.group_id))]);
+        return line.reply(event.replyToken, [text(completeOrder(t))]);
       case '/最近': {
-        const { user, group } = currentGroup(userId);
-        if (!group) return askLocation(event, user);
-        const { messages, targets } = summary(userId, group, `📍 ${group.region}`);
+        const user = db.user(userId);
+        if (!user?.region) return askLocation(event);
+        const { messages, targets } = regionSummary(userId, user.region, `📍 ${user.region}`);
         return send({ replyToken: event.replyToken }, messages, targets);
       }
       case '/單': {
-        const { user, group } = currentGroup(userId);
-        if (!group) return askLocation(event, user);
-        const orders = db.openOrders(group.group_id, 5);
-        if (!orders.length) return line.reply(event.replyToken, withQuickReply([text(`📋 ${group.region} 目前沒有未完成的單`)]));
-        const targets = orders.map((o) => ({ groupId: group.group_id, authorUserId: o.user_id, messageId: o.id }));
+        const user = db.user(userId);
+        if (!user?.region) return askLocation(event);
+        // 一次最多 5 則；/單 2 看第二批
+        const page = Math.max(1, Number(t.split(/\s+/)[1]) || 1);
+        const orders = db.regionOrders(user.region, since(), page * 5).slice((page - 1) * 5);
+        if (!orders.length) return line.reply(event.replyToken, withQuickReply([text(`📋 沒有更多跟「${user.region}」有關的單了`)]));
+        const targets = orders.map((o) => ({ groupId: o.group_id, authorUserId: o.user_id, messageId: o.id }));
         targets.userId = userId;
-        return send({ replyToken: event.replyToken }, withQuickReply(orders.map((o) => orderBubble(o, group.region))), targets);
+        return send({ replyToken: event.replyToken }, withQuickReply(orders.map((o) => orderBubble(o, user.region))), targets);
       }
     }
     return relayToGroup(event, userId, t);
@@ -287,9 +317,9 @@ export function createBot({ line, db, regions, config }) {
 
   function askLocation(event, user) {
     const why = user?.region
-      ? `「${user.region}」還沒有綁定群組，請在該區群組輸入「/綁定 ${user.region}」。`
-      : '我還不知道你在哪一區。';
-    return line.reply(event.replyToken, withQuickReply([text(`${why}\n請按下方「📍 傳送位置」。`)]));
+      ? `「${user.region}」還沒有綁定群組。\n要回覆某張單，請長按那張單選「回覆」；或在該區群組輸入「/綁定 ${user.region}」。`
+      : '我還不知道你在哪一區。\n請按下方「📍 傳送位置」。';
+    return line.reply(event.replyToken, withQuickReply([text(why)]));
   }
 
   async function onLocation(event, msg) {
@@ -306,26 +336,20 @@ export function createBot({ line, db, regions, config }) {
     }
     db.setUserLocation(userId, region.name, msg.latitude, msg.longitude, config.liveDefault);
     const header = `📍 你目前在「${region.name}」（${dist}）`;
-
-    const group = db.groupByRegion(region.name);
-    if (!group) {
-      return line.reply(event.replyToken, withQuickReply([
-        text(`${header}\n\n但這個區還沒綁定群組。請把我加進該區群組並輸入「/綁定 ${region.name}」。`),
-      ]));
-    }
-    const { messages, targets } = summary(userId, group, header);
+    const { messages, targets } = regionSummary(userId, region.name, header);
     return send({ replyToken: event.replyToken }, messages, targets);
   }
 
   async function relayToGroup(event, userId, t) {
     // 使用者長按「回覆」某則機器人轉來的訊息 → 送回那則訊息所屬的群組，並標記原作者
     const quoted = event.message.quotedMessageId ? db.relay(event.message.quotedMessageId, userId) : null;
-    let group = quoted ? db.groupById(quoted.group_id) : null;
-    if (!group) {
+    let groupId = quoted?.group_id;
+    if (!groupId) {
       const cur = currentGroup(userId);
       if (!cur.group) return askLocation(event, cur.user);
-      group = cur.group;
+      groupId = cur.group.group_id;
     }
+    const group = { group_id: groupId, label: groupLabel(groupId) };
 
     const name = await ownName(userId, group.group_id);
     const { message, mentionedUserIds } = buildGroupMessage({
@@ -343,18 +367,14 @@ export function createBot({ line, db, regions, config }) {
       return line.reply(event.replyToken, [text(`❌ 轉發失敗：${clip(err.message, 300)}`)]);
     }
 
-    const det = await config.detectOrder(t, { keywords: db.keywords(group.group_id) });
-    const order = det.isOrder;
-    const id = db.insertMessage({ groupId: group.group_id, userId, displayName: name, text: t, isOrder: order, summary: det.summary, viaBot: true });
-    // 機器人推到群組的訊息不會再觸發 webhook，所以這裡自己通知該區其他開即時轉發的人
-    forwardLive(group.group_id, { id, userId, displayName: name, text: t, isOrder: order, summary: det.summary, createdAt: Date.now() })
-      .catch((err) => console.error('即時轉發失敗', err.message));
+    // 機器人推到群組的訊息不會再觸發 webhook，所以這裡自己記錄並通知其他人
+    const rec = await record(group.group_id, { userId, displayName: name, text: t, viaBot: true });
 
     const tagged = mentionedUserIds.map((uid) => db.member(group.group_id, uid)?.display_name ?? '成員');
-    const lines = [`✅ 已送到「${group.region}」群組`];
+    const lines = [`✅ 已送到「${group.label}」`];
     if (tagged.length) lines.push(`已標記：${tagged.join('、')}`);
     if (message.substitution?.all) lines.push('已標記：所有人');
-    if (order) lines.push(`📋 已記為單 #${id}`);
+    if (rec.isOrder) lines.push(`📋 已記為單 #${rec.id}`);
     return line.reply(event.replyToken, [text(lines.join('\n'))]);
   }
 
